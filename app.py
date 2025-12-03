@@ -4,12 +4,13 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from google import genai
 from google.genai.errors import APIError as GeminiAPIError
+from google.genai import types
 import re
 import numpy as np
 import os
+import json
 
 # --- API Key Setup (Using st.secrets for secure deployment) ---
-# NOTE: The GEMINI_API_KEY must be defined in your .streamlit/secrets.toml file.
 if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
@@ -27,9 +28,15 @@ if "resume" not in st.session_state:
 if "job_desc" not in st.session_state:
     st.session_state.job_desc = ""
 
+if "ats_score" not in st.session_state:
+    st.session_state.ats_score = 0.0
+
+if "avg_llm_score" not in st.session_state:
+    st.session_state.avg_llm_score = 0.0
+
 # --- Title and Branding for Employer Tool ---
-st.title("🧑‍💼 AI Candidate Match Evaluator (Powered by Gemini)")
-st.markdown("Instantly assess candidate fit by comparing their resume against your Job Description.")
+st.title("🧑‍💼 AI Candidate Match Evaluator (Minimalist Output)")
+st.markdown("Provides only the essential metrics and critical gaps for rapid screening.")
 
 # -----------------------------------------------------
 
@@ -47,7 +54,6 @@ def extract_pdf_text(uploaded_file):
 
 
 # Function to calculate similarity (ATS Score)
-# Uses st.cache_resource to load the large model only once
 def calculate_similarity_bert(text1, text2):
     """Calculates the cosine similarity between two texts using SBERT embeddings."""
     with st.spinner('Loading SBERT Model...'):
@@ -64,66 +70,79 @@ def calculate_similarity_bert(text1, text2):
     return float(similarity)
 
 
-# Rewritten function to use the Gemini API
-def get_report(resume, job_desc):
-    """Generates a detailed candidate evaluation report using the Gemini LLM."""
+# Rewritten function to use the Gemini API and force ONLY the essential fields
+def get_report(resume, job_desc, ats_score):
+    """Generates the minimalist, essential candidate evaluation report in strict JSON format."""
     try:
-        # Initialize the Gemini Client
         client = genai.Client(api_key=api_key)
 
-        # --- REVISED PROMPT FOR EMPLOYER/RECRUITER PERSPECTIVE ---
+        # 1. Define the mandatory MINIMALIST JSON structure (Response Schema)
+        json_schema = types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                # Renamed for clarity in the final structure
+                "AI_Requirement_Score_5_0": types.Schema(type=types.Type.NUMBER, description="The mean score of 5 critical requirements from 0.0 to 5.0."),
+                "ATS_Match_Score": types.Schema(type=types.Type.NUMBER, description="The Pre-calculated ATS/Semantic Similarity Score (0.0 to 1.0)."),
+                "Gap_Point_Texts": types.Schema(
+                    type=types.Type.ARRAY,
+                    description="The 3 to 5 most critical areas where the candidate is deficient relative to the JD.",
+                    items=types.Schema(type=types.Type.STRING)
+                ),
+            },
+            required=["AI_Requirement_Score_5_0", "ATS_Match_Score", "Gap_Point_Texts"]
+        )
+
+        # 2. Simplified prompt to focus the model on calculation and minimalism
         prompt=f"""
-        # Role: AI Candidate Analyst
+        Analyze the Candidate Resume against the Job Description. Your task is to calculate the average score of 5 critical requirements and identify the top 3-5 gaps. 
+        
+        **INSTRUCTION:** Your entire response MUST be a minimalist JSON object matching the provided schema. Do NOT include any other fields.
 
-        # Objective:
-        - Analyze the provided **Candidate Resume** against the **Job Description (JD)**.
-        - Focus on quantifying the candidate's qualification level and identifying key gaps for the employer.
-
-        # Instructions for Analysis:
-        1.  **Deconstruct the JD:** Identify 5-7 most critical requirements (e.g., specific skills, years of experience, domain knowledge, education).
-        2.  **Evaluate Each Requirement:** For each requirement, assign a score out of 5 (e.g., 4.5/5) based on the evidence in the resume.
-        3.  **Scoring Criteria:**
-            - **5/5 (✅ Strong Match):** Explicitly mentioned, demonstrated with quantifiable results/experience.
-            - **3-4/5 (✅ Good Match):** Mentioned but lacks detail, or indirect evidence is present.
-            - **1-2/5 (❌ Weak Match):** Not explicitly mentioned, or only generic keywords are found.
-            - **0/5 (❌ No Match):** Requirement is critical, but no related evidence is found in the resume.
-            - **(⚠️ Unverifiable):** Use this for requirements that cannot be definitively proven (e.g., "Must be a team player") and provide a reason.
-        4.  **Final Section:** The final heading should be "Hiring Recommendation & Key Gaps:" and provide a concise summary of the candidate's suitability and list the top 3-5 critical areas (gaps) where the candidate's resume is deficient relative to the JD.
-
-        # Inputs:
-        Candidate Resume: {resume}
+        **CANDIDATE RESUME:** {resume}
         ---
-        Job Description: {job_desc}
-
-        # Output Format:
-        - Begin each point with the score (e.g., "5/5 ✅ Required Skill: Python Proficiency...").
-        - Provide a detailed explanation justifying the score and match symbol.
+        **JOB DESCRIPTION:** {job_desc}
         """
-        # -------------------------------------------------------------
-
-        # Use gemini-2.5-flash for fast and effective reasoning
+        
+        # 3. Call the Gemini API with the JSON configuration
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=json_schema
+            )
         )
-        return response.text
+        
+        # Parse the JSON immediately to inject the pre-calculated ATS score
+        report_data = json.loads(response.text)
+        report_data["ATS_Match_Score"] = float(f"{ats_score:.4f}") # Inject ATS score with 4 decimal places
+        
+        return json.dumps(report_data, indent=4) # Return the modified JSON string
         
     except GeminiAPIError as e:
-        st.error(f"Gemini API Error: Could not generate report. Please check your API key and permissions. Details: {e}")
-        return "API Error: Report generation failed."
+        st.error(f"Gemini API Error: Could not generate report. Details: {e}")
+        return json.dumps({"error": "API Error: Report generation failed.", "details": str(e)})
     except Exception as e:
         st.error(f"An unexpected error occurred during report generation: {e}")
-        return "Unexpected Error: Report generation failed."
+        return json.dumps({"error": "Unexpected Error: Report generation failed.", "details": str(e)})
 
 
 def extract_scores(text):
-    """Extracts all scores in the format X/5 from the LLM report."""
-    # Pattern to find scores in the format x/5, where x can be an integer or a float
-    pattern = r'(\d+(?:\.\d+)?)/5'
-    matches = re.findall(pattern, text)
-    # Convert matches to floats
-    scores = [float(match) for match in matches]
-    return scores
+    """
+    Extracts the AI_Requirement_Score_5_0 from the minimalist JSON report.
+    Returns the average score as a single-element list of floats.
+    """
+    try:
+        report_data = json.loads(text)
+        llm_score = report_data.get("AI_Requirement_Score_5_0")
+        if llm_score is not None:
+            return [float(llm_score)]
+        return []
+        
+    except json.JSONDecodeError:
+        return []
+    except Exception:
+        return []
 
 # -----------------------------------------------------
 # ---
@@ -133,109 +152,146 @@ def extract_scores(text):
 if not st.session_state.form_submitted:
     with st.form("evaluation_form"):
 
-        # Taking input a Resume (PDF) file
         resume_file = st.file_uploader(label="Upload Candidate Resume (PDF)", type="pdf")
 
-        # Taking input Job Description
         st.session_state.job_desc = st.text_area(
             "Enter the Job Description (JD) for this role:",
             placeholder="E.g., Senior Data Scientist: 5+ years experience, proficiency in Python, AWS, and Deep Learning..."
         )
 
-        # Form Submission Button
         submitted = st.form_submit_button("Evaluate Candidate Fit")
         if submitted:
 
-            # Allow only if Both Resume and Job Description are Submitted
             if st.session_state.job_desc and resume_file:
                 
-                # Perform extraction
                 st.session_state.resume = extract_pdf_text(resume_file)
                 
                 if st.session_state.resume == "Could not extract text from the PDF file.":
                     st.warning("Could not proceed with analysis.")
                 else:
+                    # Calculate ATS score immediately 
+                    st.session_state.ats_score = calculate_similarity_bert(st.session_state.resume, st.session_state.job_desc)
                     st.session_state.form_submitted = True
-                    st.rerun()  # Refresh the page to close the form and display results
+                    st.rerun()
 
-            # Do not allow if not uploaded
             else:
                 st.warning("Please upload a **Resume** and provide a **Job Description** to analyze.")
 
 
 if st.session_state.form_submitted:
     
-    # Placeholders for dynamic updates
-    score_place = st.info("Step 1/2: Calculating ATS Similarity Score...")
+    score_place = st.info("Step 1/2: Calculating ATS Score and preparing data...")
     
-    # 1. Calculate the ATS Score
-    ats_score = calculate_similarity_bert(st.session_state.resume, st.session_state.job_desc)
+    ats_score = st.session_state.ats_score
     
-    score_place.info("Step 2/2: Generating Detailed Analysis Report (This may take up to 30 seconds)...")
+    score_place.info("Step 2/2: Generating Minimalist Structured Report (Max 30 seconds)...")
     
     # 2. Get the Analysis Report from LLM (Gemini)
-    report = get_report(st.session_state.resume, st.session_state.job_desc)
+    report = get_report(st.session_state.resume, st.session_state.job_desc, ats_score)
 
-    # 3. Calculate the Average Score from the LLM Report
+    # 3. Extract the final LLM Score from the generated JSON
     report_scores = extract_scores(report) 
     
-    # Correctly calculate the average score out of 5
     if report_scores:
-        avg_score = np.mean(report_scores) 
+        avg_score = report_scores[0]
         avg_score_display = f"{avg_score:.2f} / 5.0"
     else:
+        avg_score = 0.0
         avg_score_display = "N/A"
 
     score_place.success("Evaluation completed successfully!")
     st.markdown("---")
 
-    # --- Display Scores ---
+    # --- Display Scores and Key Gaps ---
     
-    st.subheader("📊 Candidate Fit Overview")
+    st.subheader("📊 Essential Candidate Metrics")
     col1, col2 = st.columns(2, border=True)
     
     with col1:
-        st.write("Keywords and Contextual Similarity Score (ATS Perspective):")
+        st.write("Keywords and Contextual Similarity Score:")
         st.metric(label="ATS Match Score (0.0 to 1.0)", value=f"{ats_score:.4f}")
-        st.caption("Represents the semantic match between resume and JD. Used for initial filtering.")
 
     with col2:
-        st.write("Average Requirement Fulfillment Score (AI Analyst Perspective):")
-        st.metric(label="AI Requirement Score", value=avg_score_display)
-        st.caption("Average of individual requirement scores (out of 5) from the detailed report.")
+        st.write("Average Requirement Fulfillment Score:")
+        st.metric(label="AI Requirement Score (Avg / 5.0)", value=avg_score_display)
     
+    # Try to display the key gaps prominently
+    try:
+        parsed_json = json.loads(report)
+        gaps = parsed_json.get('Gap_Point_Texts', [])
+        
+        st.markdown("---")
+        st.subheader("Key Deficiencies (Gap Points)")
+        
+        if gaps:
+            for gap in gaps:
+                st.markdown(f"* ❌ **{gap}**")
+        else:
+            st.markdown("* **No critical gaps identified.**")
+        
+    except json.JSONDecodeError:
+        st.warning("Could not parse the report. Displaying raw output:")
+        st.code(report)
+        
     st.markdown("---")
 
-    # --- Display Detailed Report ---
+    # --- Display Detailed Report (JSON) ---
     
-    st.subheader("AI Analyst's Detailed Evaluation Report")
+    st.subheader("Raw Structured Output (JSON)")
     
-    st.markdown("---")
-    st.markdown(report)
+    try:
+        st.code(report, language="json")
+    except NameError:
+        # Fallback if the report variable is somehow lost
+        st.error("Report generation failed.")
+
     st.markdown("---")
 
-    # --- Action Buttons ---
+    # --- Action Buttons (Dual Downloads) ---
     
     st.subheader("Report Actions")
     
-    col_d, col_r, _ = st.columns([1, 1, 4])
+    # Prepare data for Word/Text Download (formatted key-value pairs)
+    try:
+        word_data = f"CANDIDATE ESSENTIAL METRICS\n"
+        word_data += f"--------------------------------------------------\n"
+        word_data += f"ATS MATCH SCORE: {parsed_json.get('ATS_Match_Score', 'N/A')}\n"
+        word_data += f"AI REQUIREMENT SCORE: {parsed_json.get('AI_Requirement_Score_5_0', 'N/A')}/5.0\n\n"
+        word_data += f"KEY DEFICIENCIES (GAP POINTS):\n"
+        for gap in parsed_json.get('Gap_Point_Texts', []):
+            word_data += f"- {gap}\n"
+    except Exception:
+        word_data = "Error: Could not format the structured report for text download."
+
+
+    col_json, col_word, col_r, _ = st.columns([1.5, 1.5, 1, 3])
     
-    with col_d:
-        # Download Button
+    with col_json:
+        # JSON Download Button
         st.download_button(
-            label="Download Report (TXT)",
+            label="📥 Download JSON File",
             data=report,
-            file_name="Candidate_Evaluation_Report.txt",
-            mime="text/plain",
-            icon="📥",
+            file_name="Candidate_Metrics_Report.json",
+            mime="application/json",
         )
     
+    with col_word:
+        # Text/Word Download Button
+        st.download_button(
+            label="📄 Download Text Report",
+            data=word_data,
+            file_name="Candidate_Metrics_Summary.txt",
+            mime="text/plain",
+            help="This summary is formatted for easy viewing in a text editor or Microsoft Word."
+        )
+
     with col_r:
         # Reset/Rerun Button
         if st.button("Evaluate New Candidate", key="reset_button", icon="🔄"):
             st.session_state.form_submitted = False
             st.session_state.resume = ""
             st.session_state.job_desc = ""
+            st.session_state.ats_score = 0.0
             st.rerun()
 
 # -----------------------------------------------------
