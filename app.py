@@ -4,9 +4,11 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from google import genai
 from google.genai.errors import APIError as GeminiAPIError
+from google.genai import types # Import types for Response Schema
 import re
 import numpy as np
 import os
+import json # Import for handling JSON output
 
 # --- API Key Setup (Using st.secrets for secure deployment) ---
 # NOTE: The GEMINI_API_KEY must be defined in your .streamlit/secrets.toml file.
@@ -28,8 +30,8 @@ if "job_desc" not in st.session_state:
     st.session_state.job_desc = ""
 
 # --- Title and Branding for Employer Tool ---
-st.title("🧑‍💼 AI Candidate Match Evaluator")
-st.markdown("Instantly assess candidate fit by comparing their resume against your Job Description.")
+st.title("🧑‍💼 AI Candidate Match Evaluator (JSON Output)")
+st.markdown("Instantly assess candidate fit by comparing their resume against your Job Description for structured, concise data.")
 
 # -----------------------------------------------------
 
@@ -64,66 +66,87 @@ def calculate_similarity_bert(text1, text2):
     return float(similarity)
 
 
-# Rewritten function to use the Gemini API
+# Rewritten function to use the Gemini API and force JSON output
 def get_report(resume, job_desc):
-    """Generates a detailed candidate evaluation report using the Gemini LLM."""
+    """Generates a detailed candidate evaluation report using the Gemini LLM in strict JSON format."""
     try:
-        # Initialize the Gemini Client
         client = genai.Client(api_key=api_key)
 
-        # --- REVISED PROMPT FOR EMPLOYER/RECRUITER PERSPECTIVE ---
+        # 1. Define the mandatory JSON structure (Response Schema)
+        json_schema = types.Schema(
+            type=types.Type.OBJECT,
+            properties={
+                "Key_Requirements_Evaluation": types.Schema(
+                    type=types.Type.ARRAY,
+                    description="An array of 5 to 7 most critical JD requirements and their assessment.",
+                    items=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "Requirement": types.Schema(type=types.Type.STRING, description="The specific requirement from the JD."),
+                            "Score_5_0": types.Schema(type=types.Type.NUMBER, description="Score from 0.0 to 5.0."),
+                            "Justification": types.Schema(type=types.Type.STRING, description="Concise justification for the score based on the resume evidence.")
+                        },
+                        required=["Requirement", "Score_5_0", "Justification"]
+                    )
+                ),
+                "Hiring_Recommendation": types.Schema(type=types.Type.STRING, description="Overall summary of candidate suitability (e.g., 'Strong Hire', 'Interview Recommended', 'Do Not Proceed')."),
+                "Top_3_Gaps": types.Schema(
+                    type=types.Type.ARRAY,
+                    description="Top 3 to 5 critical areas where the candidate's resume is deficient relative to the JD.",
+                    items=types.Schema(type=types.Type.STRING)
+                )
+            },
+            required=["Key_Requirements_Evaluation", "Hiring_Recommendation", "Top_3_Gaps"]
+        )
+
+        # 2. Simplified prompt to focus the model on the task and JSON adherence
         prompt=f"""
-        # Role: AI Candidate Analyst
+        Analyze the Candidate Resume against the Job Description. Your entire response MUST be a valid JSON object matching the provided schema.
 
-        # Objective:
-        - Analyze the provided **Candidate Resume** against the **Job Description (JD)**.
-        - Focus on quantifying the candidate's qualification level and identifying key gaps for the employer.
-
-        # Instructions for Analysis:
-        1.  **Deconstruct the JD:** Identify 5-7 most critical requirements (e.g., specific skills, years of experience, domain knowledge, education).
-        2.  **Evaluate Each Requirement:** For each requirement, assign a score out of 5 (e.g., 4.5/5) based on the evidence in the resume.
-        3.  **Scoring Criteria:**
-            - **5/5 (✅ Strong Match):** Explicitly mentioned, demonstrated with quantifiable results/experience.
-            - **3-4/5 (✅ Good Match):** Mentioned but lacks detail, or indirect evidence is present.
-            - **1-2/5 (❌ Weak Match):** Not explicitly mentioned, or only generic keywords are found.
-            - **0/5 (❌ No Match):** Requirement is critical, but no related evidence is found in the resume.
-            - **(⚠️ Unverifiable):** Use this for requirements that cannot be definitively proven (e.g., "Must be a team player") and provide a reason.
-        4.  **Final Section:** The final heading should be "Hiring Recommendation & Key Gaps:" and provide a concise summary of the candidate's suitability and list the top 3-5 critical areas (gaps) where the candidate's resume is deficient relative to the JD.
-
-        # Inputs:
-        Candidate Resume: {resume}
+        **CANDIDATE RESUME:** {resume}
         ---
-        Job Description: {job_desc}
-
-        # Output Format:
-        - Begin each point with the score (e.g., "5/5 ✅ Required Skill: Python Proficiency...").
-        - Provide a detailed explanation justifying the score and match symbol.
+        **JOB DESCRIPTION:** {job_desc}
         """
-        # -------------------------------------------------------------
-
-        # Use gemini-2.5-flash for fast and effective reasoning
+        
+        # 3. Call the Gemini API with the JSON configuration
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=prompt
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=json_schema
+            )
         )
         return response.text
         
     except GeminiAPIError as e:
         st.error(f"Gemini API Error: Could not generate report. Please check your API key and permissions. Details: {e}")
-        return "API Error: Report generation failed."
+        # Return structured error message
+        return json.dumps({"error": "API Error: Report generation failed.", "details": str(e)})
     except Exception as e:
         st.error(f"An unexpected error occurred during report generation: {e}")
-        return "Unexpected Error: Report generation failed."
+        return json.dumps({"error": "Unexpected Error: Report generation failed.", "details": str(e)})
 
 
 def extract_scores(text):
-    """Extracts all scores in the format X/5 from the LLM report."""
-    # Pattern to find scores in the format x/5, where x can be an integer or a float
-    pattern = r'(\d+(?:\.\d+)?)/5'
-    matches = re.findall(pattern, text)
-    # Convert matches to floats
-    scores = [float(match) for match in matches]
-    return scores
+    """
+    Extracts scores from the JSON report.
+    Returns scores as a list of floats. Returns empty list if parsing fails.
+    """
+    try:
+        report_data = json.loads(text)
+        scores = []
+        for item in report_data.get("Key_Requirements_Evaluation", []):
+            score = item.get("Score_5_0")
+            if score is not None:
+                scores.append(float(score))
+        return scores
+    except json.JSONDecodeError:
+        # If the input text isn't valid JSON, return empty list
+        return []
+    except Exception:
+        # Handle other potential errors
+        return []
 
 # -----------------------------------------------------
 # ---
@@ -171,7 +194,7 @@ if st.session_state.form_submitted:
     # 1. Calculate the ATS Score
     ats_score = calculate_similarity_bert(st.session_state.resume, st.session_state.job_desc)
     
-    score_place.info("Step 2/2: Generating Detailed Analysis Report (This may take up to 30 seconds)...")
+    score_place.info("Step 2/2: Generating Structured Analysis Report (This may take up to 30 seconds)...")
     
     # 2. Get the Analysis Report from LLM (Gemini)
     report = get_report(st.session_state.resume, st.session_state.job_desc)
@@ -202,16 +225,27 @@ if st.session_state.form_submitted:
     with col2:
         st.write("Average Requirement Fulfillment Score (AI Analyst Perspective):")
         st.metric(label="AI Requirement Score", value=avg_score_display)
-        st.caption("Average of individual requirement scores (out of 5) from the detailed report.")
+        st.caption("Average of individual requirement scores (out of 5) extracted from the structured report.")
     
     st.markdown("---")
 
-    # --- Display Detailed Report ---
+    # --- Display Detailed Report in JSON Format ---
     
-    st.subheader("AI Analyst's Detailed Evaluation Report")
+    st.subheader("AI Analyst's Structured Evaluation Report (JSON)")
     
-    st.markdown("---")
-    st.markdown(report)
+    try:
+        # Attempt to load the report as JSON for pretty printing
+        parsed_json = json.loads(report)
+        st.json(parsed_json)
+        
+        # Display key insights clearly above the JSON block
+        st.markdown(f"**Overall Recommendation:** **{parsed_json.get('Hiring_Recommendation', 'N/A')}**")
+        st.markdown(f"**Top Gaps:** {', '.join(parsed_json.get('Top_3_Gaps', ['N/A']))}")
+    except json.JSONDecodeError:
+        # If the report is an error message or invalid JSON, display as text
+        st.error("Error: Could not parse report as JSON. Displaying raw text/error message:")
+        st.code(report)
+
     st.markdown("---")
 
     # --- Action Buttons ---
@@ -223,10 +257,10 @@ if st.session_state.form_submitted:
     with col_d:
         # Download Button
         st.download_button(
-            label="Download Report (TXT)",
+            label="Download JSON Report",
             data=report,
-            file_name="Candidate_Evaluation_Report.txt",
-            mime="text/plain",
+            file_name="Candidate_Evaluation_Report.json",
+            mime="application/json",
             icon="📥",
         )
     
