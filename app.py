@@ -28,7 +28,7 @@ if "job_desc" not in st.session_state:
     st.session_state.job_desc = ""
 
 # --- Title and Branding for Employer Tool ---
-st.title("🧑‍💼 AI Candidate Match Evaluator (Powered by Gemini)")
+st.title("🧑‍💼 AI Candidate Match Evaluator")
 st.markdown("Instantly assess candidate fit by comparing their resume against your Job Description.")
 
 # -----------------------------------------------------
