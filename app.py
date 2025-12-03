@@ -15,7 +15,7 @@ if "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 else:
     # Fallback/error message if key is missing
-    st.error("GEMINI_API_KEY not found in Streamlit secrets.")
+    st.error("GEMINI_API_KEY not found in Streamlit secrets. Please configure it.")
     st.stop()
 
 # --- Session States to store values ---
@@ -30,13 +30,6 @@ if "job_desc" not in st.session_state:
 
 if "ats_score" not in st.session_state:
     st.session_state.ats_score = 0.0
-
-if "avg_llm_score" not in st.session_state:
-    st.session_state.avg_llm_score = 0.0
-
-# --- Title and Branding for Employer Tool ---
-st.title("🧑‍💼 AI Candidate Match Evaluator (Minimalist Output)")
-st.markdown("Provides only the essential metrics and critical gaps for rapid screening.")
 
 # -----------------------------------------------------
 
@@ -59,7 +52,8 @@ def calculate_similarity_bert(text1, text2):
     with st.spinner('Loading SBERT Model...'):
         @st.cache_resource
         def load_model():
-            return SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+            # Use a slightly smaller model for faster startup if bandwidth is a concern
+            return SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
             
         ats_model = load_model()
     
@@ -70,7 +64,7 @@ def calculate_similarity_bert(text1, text2):
     return float(similarity)
 
 
-# Rewritten function to use the Gemini API and force ONLY the essential fields
+# Function to use the Gemini API and force ONLY the essential fields
 def get_report(resume, job_desc, ats_score):
     """Generates the minimalist, essential candidate evaluation report in strict JSON format."""
     try:
@@ -80,23 +74,22 @@ def get_report(resume, job_desc, ats_score):
         json_schema = types.Schema(
             type=types.Type.OBJECT,
             properties={
-                # Renamed for clarity in the final structure
                 "AI_Requirement_Score_5_0": types.Schema(type=types.Type.NUMBER, description="The mean score of 5 critical requirements from 0.0 to 5.0."),
-                "ATS_Match_Score": types.Schema(type=types.Type.NUMBER, description="The Pre-calculated ATS/Semantic Similarity Score (0.0 to 1.0)."),
+                # Note: ATS_Match_Score is injected later, but included here for completeness
                 "Gap_Point_Texts": types.Schema(
                     type=types.Type.ARRAY,
                     description="The 3 to 5 most critical areas where the candidate is deficient relative to the JD.",
                     items=types.Schema(type=types.Type.STRING)
                 ),
             },
-            required=["AI_Requirement_Score_5_0", "ATS_Match_Score", "Gap_Point_Texts"]
+            required=["AI_Requirement_Score_5_0", "Gap_Point_Texts"] # ATS_Match_Score is added externally
         )
 
         # 2. Simplified prompt to focus the model on calculation and minimalism
         prompt=f"""
-        Analyze the Candidate Resume against the Job Description. Your task is to calculate the average score of 5 critical requirements and identify the top 3-5 gaps. 
+        Analyze the Candidate Resume against the Job Description. Your task is to calculate the average score of 5 critical requirements (0.0 to 5.0) and identify the top 3-5 critical gaps where the candidate's experience is lacking.
         
-        **INSTRUCTION:** Your entire response MUST be a minimalist JSON object matching the provided schema. Do NOT include any other fields.
+        **INSTRUCTION:** Your entire response MUST be a minimalist JSON object matching the provided schema. Do NOT include any other fields or text outside the JSON structure.
 
         **CANDIDATE RESUME:** {resume}
         ---
@@ -115,7 +108,8 @@ def get_report(resume, job_desc, ats_score):
         
         # Parse the JSON immediately to inject the pre-calculated ATS score
         report_data = json.loads(response.text)
-        report_data["ATS_Match_Score"] = float(f"{ats_score:.4f}") # Inject ATS score with 4 decimal places
+        # Inject the pre-calculated SBERT score into the final JSON structure
+        report_data["ATS_Match_Score"] = float(f"{ats_score:.4f}") 
         
         return json.dumps(report_data, indent=4) # Return the modified JSON string
         
@@ -145,8 +139,12 @@ def extract_scores(text):
         return []
 
 # -----------------------------------------------------
+# --- Title and Branding for Employer Tool ---
+st.title("🧑‍💼 AI Candidate Match Evaluator (Minimalist Output)")
+st.markdown("Provides only the **essential metrics** and **critical gaps** for rapid screening.")
+
 # ---
-# ## 🚀 Streamlit Application Workflow
+## 🚀 Streamlit Application Workflow
 
 # Displays Form only if the form is not submitted
 if not st.session_state.form_submitted:
@@ -166,7 +164,7 @@ if not st.session_state.form_submitted:
                 
                 st.session_state.resume = extract_pdf_text(resume_file)
                 
-                if st.session_state.resume == "Could not extract text from the PDF file.":
+                if "Could not extract text" in st.session_state.resume:
                     st.warning("Could not proceed with analysis.")
                 else:
                     # Calculate ATS score immediately 
@@ -214,8 +212,8 @@ if st.session_state.form_submitted:
     with col2:
         st.write("Average Requirement Fulfillment Score:")
         st.metric(label="AI Requirement Score (Avg / 5.0)", value=avg_score_display)
-    
-    # Try to display the key gaps prominently
+
+    # Try to display the key gaps prominently and prepare data for tables/downloads
     try:
         parsed_json = json.loads(report)
         gaps = parsed_json.get('Gap_Point_Texts', [])
@@ -230,20 +228,55 @@ if st.session_state.form_submitted:
             st.markdown("* **No critical gaps identified.**")
         
     except json.JSONDecodeError:
-        st.warning("Could not parse the report. Displaying raw output:")
-        st.code(report)
+        # Fallback if the initial parsing failed
+        st.warning("Could not parse the initial report for gap points.")
+        gaps = [] # Ensure gaps is defined even on failure
         
     st.markdown("---")
 
-    # --- Display Detailed Report (JSON) ---
+    ## 📄 Structured Report Summary Table (Key-Value Format)
     
+    st.subheader("📄 Structured Report Summary Table")
+    
+    try:
+        # Re-parse or use existing parsed_json to ensure the latest data
+        parsed_json = json.loads(report)
+
+        # 1. Display the numerical scores table
+        table_data_metrics = {
+            "Metric": ["AI Requirement Score", "ATS Match Score"],
+            "Value": [
+                f"{parsed_json.get('AI_Requirement_Score_5_0', 'N/A')}/5.0",
+                f"{parsed_json.get('ATS_Match_Score', 'N/A'):.4f}" 
+            ]
+        }
+        st.table(table_data_metrics)
+
+        # 2. Display the Gaps as a list/text since they are a complex field
+        st.markdown("### Gap Point Texts")
+        gaps = parsed_json.get('Gap_Point_Texts', [])
+        if gaps:
+            # Convert list of strings to list of dictionaries for st.table
+            gap_table_data = [{"Gap Text": gap} for gap in gaps]
+            st.table(gap_table_data)
+        else:
+            st.markdown("*No detailed gap points found in the JSON.*")
+
+
+    except Exception as e:
+        st.error(f"Error creating summary table: {e}")
+
+
+    st.markdown("---")
+
+    # --- Existing Raw JSON Output ---
     st.subheader("Raw Structured Output (JSON)")
     
     try:
+        # Show the raw JSON output for debugging/completeness
         st.code(report, language="json")
     except NameError:
-        # Fallback if the report variable is somehow lost
-        st.error("Report generation failed.")
+        st.error("Report generation failed and the raw JSON is not available.")
 
     st.markdown("---")
 
@@ -293,5 +326,3 @@ if st.session_state.form_submitted:
             st.session_state.job_desc = ""
             st.session_state.ats_score = 0.0
             st.rerun()
-
-# -----------------------------------------------------
