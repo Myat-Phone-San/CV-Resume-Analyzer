@@ -70,7 +70,7 @@ def calculate_similarity_bert(text1, text2):
     return float(similarity)
 
 
-# Function to use the Gemini API and force ONLY the essential fields (JSON output)
+# Rewritten function to use the Gemini API and force ONLY the essential fields
 def get_report(resume, job_desc, ats_score):
     """Generates the minimalist, essential candidate evaluation report in strict JSON format."""
     try:
@@ -80,6 +80,7 @@ def get_report(resume, job_desc, ats_score):
         json_schema = types.Schema(
             type=types.Type.OBJECT,
             properties={
+                # Renamed for clarity in the final structure
                 "AI_Requirement_Score_5_0": types.Schema(type=types.Type.NUMBER, description="The mean score of 5 critical requirements from 0.0 to 5.0."),
                 "ATS_Match_Score": types.Schema(type=types.Type.NUMBER, description="The Pre-calculated ATS/Semantic Similarity Score (0.0 to 1.0)."),
                 "Gap_Point_Texts": types.Schema(
@@ -93,7 +94,7 @@ def get_report(resume, job_desc, ats_score):
 
         # 2. Simplified prompt to focus the model on calculation and minimalism
         prompt=f"""
-        Analyze the Candidate Resume against the Job Description. Your task is to calculate the average score of 5 critical requirements (AI_Requirement_Score_5_0) and identify the top 3-5 gaps (Gap_Point_Texts). 
+        Analyze the Candidate Resume against the Job Description. Your task is to calculate the average score of 5 critical requirements and identify the top 3-5 gaps. 
         
         **INSTRUCTION:** Your entire response MUST be a minimalist JSON object matching the provided schema. Do NOT include any other fields.
 
@@ -201,47 +202,51 @@ if st.session_state.form_submitted:
     score_place.success("Evaluation completed successfully!")
     st.markdown("---")
 
-    # --- Display Scores and Key Gaps in TABLE FORMAT ---
+    # --- Display Scores and Key Gaps ---
     
-    st.subheader("📊 Essential Candidate Metrics (Key-Value Table)")
+    st.subheader("📊 Essential Candidate Metrics")
+    col1, col2 = st.columns(2, border=True)
     
-    # Try to parse the report for display
+    with col1:
+        st.write("Keywords and Contextual Similarity Score:")
+        st.metric(label="ATS Match Score (0.0 to 1.0)", value=f"{ats_score:.4f}")
+
+    with col2:
+        st.write("Average Requirement Fulfillment Score:")
+        st.metric(label="AI Requirement Score (Avg / 5.0)", value=avg_score_display)
+    
+    # Try to display the key gaps prominently
     try:
         parsed_json = json.loads(report)
         gaps = parsed_json.get('Gap_Point_Texts', [])
         
-        # 1. Display Scores using st.columns/st.metric
-        col1, col2 = st.columns(2, border=True)
-        
-        with col1:
-            st.write("Keywords and Contextual Similarity Score:")
-            st.metric(label="ATS Match Score (0.0 to 1.0)", value=f"{parsed_json.get('ATS_Match_Score', 'N/A'):.4f}")
-
-        with col2:
-            st.write("Average Requirement Fulfillment Score:")
-            st.metric(label="AI Requirement Score (Avg / 5.0)", value=f"{parsed_json.get('AI_Requirement_Score_5_0', 'N/A'):.2f} / 5.0")
-        
         st.markdown("---")
-        
-        # 2. Display Gaps using a markdown table
         st.subheader("Key Deficiencies (Gap Points)")
         
         if gaps:
-            # Create a markdown table for the gaps
-            st.markdown("| Status | Gap Point Text |")
-            st.markdown("| :---: | :--- |")
-            for i, gap in enumerate(gaps):
-                # Using a fixed symbol for visual status
-                st.markdown(f"| ❌ | {gap} |")
+            for gap in gaps:
+                st.markdown(f"* ❌ **{gap}**")
         else:
-            st.success("✅ **No critical gaps identified.**")
+            st.markdown("* **No critical gaps identified.**")
         
     except json.JSONDecodeError:
-        st.error("Could not parse the report. Displaying raw output:")
+        st.warning("Could not parse the report. Displaying raw output:")
         st.code(report)
         
     st.markdown("---")
+
+    # --- Display Detailed Report (JSON) ---
     
+    st.subheader("Raw Structured Output (JSON)")
+    
+    try:
+        st.code(report, language="json")
+    except NameError:
+        # Fallback if the report variable is somehow lost
+        st.error("Report generation failed.")
+
+    st.markdown("---")
+
     # --- Action Buttons (Dual Downloads) ---
     
     st.subheader("Report Actions")
